@@ -249,7 +249,6 @@ MCAManager.prototype.writeRawAt = function(offset,data,compression,cb){
 }
 
 MCAManager.prototype.writeRaw = function(x,y,data,compression,cb){
-    console.log(data.length);
     var self = this;
     self.getPosition(x,y,function(err,offset,sectors){        
         if(err){
@@ -260,9 +259,7 @@ MCAManager.prototype.writeRaw = function(x,y,data,compression,cb){
             self.writeRawAt(offset,data,compression,cb);
         }else{            
             var newsectors = Math.ceil(data.length/4096);
-            var newoffset = self.findSpace(newsectors*4096);
-            console.log(newoffset);
-            
+            var newoffset = self.findSpace(newsectors*4096);            
             self.useSpace(newoffset,newsectors*4096);            
             self.writeRawAt(newoffset,data,compression,function(err){
                 if(err){
