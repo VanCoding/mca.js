@@ -1,0 +1,21 @@
+{
+  "name": "mca.js",
+  "version": "0.0.1",
+  "description": "A node.js module to read/write from/to region files of Minecraft.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git@github.com:VanCoding/mca.js.git"
+  },
+  "keywords": [
+    "minecraft",
+    "region",
+    "mca"
+  ],
+  "author": "Patrik Stutz",
+  "license": "GPL",
+  "readmeFilename": "readme.md"
+}
