@@ -224,6 +224,8 @@ MCAManager.prototype.setPosition = function(x,y,offset,sectors,cb){
             cb(err);
             return;
         }
+        self.head[x][y].offset = offset;
+        self.head[x][y].sectors = sectors;
         cb(null);
     });
 }
