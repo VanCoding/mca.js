@@ -15,6 +15,9 @@
     "region",
     "mca"
   ],
+  "dependencies":{
+    "weakmap.js":"*"
+  },
   "author": "Patrik Stutz",
   "license": "GPL",
   "readmeFilename": "readme.md"

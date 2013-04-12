@@ -1,67 +1,176 @@
 var fs = require("fs");
 var zlib = require("zlib");
+var WeakMap = require("weakmap.js");
 
 module.exports = MCAManager;
 
 
 function MCAManager(path){
+	var self = this;
     this.path = path;
+    this.opqueue = [];
+	this.operating = false;
+	this.cache = new WeakMap();
+	this.cachecallbacks = {};
+	this.cache.ondelete = function(){
+		self.cleanup();
+	}
 }
 
-MCAManager.prototype.create = function(cb){
-    fs.writeFile(this.path,new Buffer(8192),function(err){
-        if(err){
-            cb(err);
-            return;
-        }
-        cb(null);
-    });
+MCAManager.prototype.cleanup = function(){
+	if(!this.cache.keys().length){
+		this._close = function(){
+			delete this.handle;
+			delete this.head;
+			delete this.availablespace;
+			this.opqueue = [];
+			this.operating = false;
+		}
+	}
+}
+
+MCAManager.prototype._operate = function(){
+	var self = this;
+	if(this.opqueue.length){
+		var op = this.opqueue[0];
+        this.opqueue.splice(0,1);
+		switch(op[0]){
+			case 0:
+				var buf = new Buffer(op[1]);
+				fs.read(self.handle,buf,0,buf.length,op[2],function(err){
+					if(err){
+						op[3](err);
+					}else{
+						op[3](null,buf);
+					}
+					self._operate();
+				});
+				break;
+			case 1:
+				var buf = op[1];
+				fs.write(self.handle,buf,0,buf.length,op[2],function(err){
+					if(err){
+						op[3](err);
+					}else{
+						op[3](null);
+					}
+					self._operate();
+				});
+				break;
+			case 2:
+				fs.close(self.handle,op[1]);
+				break;
+		}
+	}else{
+		this.operating = false;
+	}
+}
+
+MCAManager.prototype._op = function(args){
+	this.opqueue.push(args);
+	if(!this.operating){
+        this.operating = true;
+		this._operate();
+	}
+}
+
+MCAManager.prototype._close = function(cb){
+	this._op([2,cb]);
+}
+
+MCAManager.prototype._write = function(buf,offset,cb){
+	this._op([1,buf,offset,cb]);
+}
+
+MCAManager.prototype._read = function(length,offset,cb){
+	this._op([0,length,offset,cb]);
 }
 
 MCAManager.prototype.open = function(cb){
-    var self = this;
-    fs.open(this.path,"r+",function(err,handle){        
-        if(err){
-            cb(err);
-            return;
-        }
-        self.handle = handle;
-        cb(null);
-    });
+	if(this.handle){
+		cb();
+	}else{
+		var cbs = this.opencallbacks;
+		if(!cbs){
+			cbs = this.opencallbacks = [cb];
+			function callcallbacks(err){
+				delete self.opencallbacks;
+				for(var i = 0; i < cbs.length; i++){
+					cbs[i](err);
+				}
+			}		
+			var self = this;
+			fs.open(self.path,"r+",function(err,handle){        
+				if(err){
+					callcallbacks(err);
+					return;
+				}
+				self.handle = handle;		
+				callcallbacks(null);
+			});
+		}else{
+			cbs.push(cb);
+		}
+	}
 }
+
 
 MCAManager.prototype.init = function(cb){
     var self = this;
-    var buf = new Buffer(8192);
-    fs.read(this.handle,buf,0,buf.length,0,function(err){
-        if(err){
-            cb(err);
-            return;
-        }
-        self.head = {};
-        self.availablespace = [{start:8192,end:-1}];
-        var i = 0;
-        for(var x = 0; x < 32; x++){     
-            self.head[x] = {};
-            for(var y = 0; y < 32; y++){
-                (function(x,y){
-                    var offset = (buf[i*4]*256*256+buf[i*4+1]*256+buf[i*4+2])*4096;
-                    var sectors = buf[i*4+3];
-                    var timestamp = buf.readUInt32BE(4096+i*4);                    
-                    self.head[x][y] = {
-                        offset:offset,
-                        sectors:sectors,
-                        timestamp:timestamp
-                    };
-                    if(offset){                        
-                        self.useSpace(offset,sectors*4096);
-                    }
-                    i++;
-                })(x,y);
-            }            
-        }
-        cb(null);
-    });
+	if(this.head){
+		cb();
+	}else{
+		this.open(function(err){	
+			if(err){
+				cb(err);
+				return;
+			}
+		
+			var cbs = this.initcallbacks;
+			if(!cbs){
+				cbs = this.initcallbacks = [cb];
+				function callcallbacks(err){
+					delete self.initcallbacks;
+					for(var i = 0; i < cbs.length; i++){
+						cbs[i](err);
+					}
+				}
+				self._read(8192,0,function(err,buf){
+					if(err){
+						callcallbacks(err);
+						return;
+					}
+					self.head = {};
+					self.availablespace = [{start:8192,end:-1}];
+					var i = 0;
+					for(var y = 0; y < 32; y++){
+						for(var x = 0; x < 32; x++){ 
+							(function(x,y){
+								var offset = (buf[i*4]*256*256+buf[i*4+1]*256+buf[i*4+2])*4096;
+								var sectors = buf[i*4+3];
+								var timestamp = buf.readUInt32BE(4096+i*4);      
+								if(!self.head[x]){
+									self.head[x] = {};
+								}
+								self.head[x][y] = {
+									offset:offset,
+									sectors:sectors,
+									timestamp:timestamp
+								};
+								if(offset){                        
+									self.useSpace(offset,sectors*4096);
+								}
+								i++;
+							})(x,y);
+						}            
+					}
+					callcallbacks(null);
+				});
+			}else{
+				cbs.push(cb);
+			}
+		});
+	}
 }
 
 MCAManager.prototype.has = function(x,y,cb){
@@ -131,34 +240,43 @@ MCAManager.prototype.freeSpace = function(start,length){
 
 
 MCAManager.prototype.getPosition = function(x,y,cb){
-    if(this.head){
-        var pos = this.head[x][y];
-        if(pos.offset){
-            cb(null,pos.offset,pos.sectors);
-        }else{
-            cb(null);
-        }
-    }else{
-        var buf = new Buffer(4);
-        fs.read(this.handle,buf,0,buf.length,(y*32+x)*4,function(err){
-            if(err){
-                cb(err);
-                return;
-            }        
-            var offset = (buf[0] *256*256 + buf[1] * 256 + buf[2])*4096;
-            var sectors = buf[3]; 
-            if(offset){
-                cb(null,offset,sectors);
-            }else{
-                cb(null);
-            }      
-        });
-    }
+	var self = this;
+	this.open(function(err){
+		if(err){
+			cb(err);
+			return;
+		}
+
+		if(self.head){
+			var pos = self.head[x];
+			if(pos){
+				pos = pos[y];
+			}
+			if(pos && pos.offset){
+				cb(null,pos.offset,pos.sectors);
+			}else{
+				cb(null);
+			}
+		}else{
+			self._read(4,(y*32+x)*4,function(err,buf){
+				if(err){
+					cb(err);
+					return;
+				}        
+				var offset = (buf[0] *256*256 + buf[1] * 256 + buf[2])*4096;
+				var sectors = buf[3]; 
+				if(offset){
+					cb(null,offset,sectors);
+				}else{
+					cb(null);
+				}      
+			});
+		}
+	});
 }
 
 MCAManager.prototype.getLengthAndCompression = function(offset,cb){
-    buf = new Buffer(5);
-    fs.read(this.handle,buf,0,buf.length,offset,function(err){
+    this._read(5,offset,function(err,buf){
         if(err){
             cb(err);
             return;
@@ -192,44 +310,69 @@ MCAManager.prototype.getPositionLengthAndCompression = function(x,y,cb){
 
 MCAManager.prototype.readRaw = function(x,y,cb){
     var self = this;
-    self.getPositionLengthAndCompression(x,y,function(err,offset,length,compression){
-        if(err){
-            cb(err);
-            return;
-        }
-        if(offset){
-            buf = new Buffer(length);
-            fs.read(self.handle,buf,0,buf.length,offset+5,function(err){
-                if(err){
-                    cb(err);
-                    return;
-                }
-                cb(null,buf,compression);
-            });           
-        }else{
-            cb(null);
-        }       
-    });
+	self.getPositionLengthAndCompression(x,y,function(err,offset,length,compression){
+		if(err){
+			cb(err);
+			return;
+		}
+		if(offset){
+			self._read(length,offset+5,function(err,buf){
+				if(err){
+					cb(err);
+					return;
+				}
+				cb(null,buf,compression);
+			});           
+		}else{
+			cb(null);
+		}       
+	});
 }
 
-MCAManager.prototype.read = function(x,y,cb){
-    this.readRaw(x,y,function(err,data,compression){
-        if(err){
-            cb(err);
-            return;
-        }        
-        switch(compression){
-            case 1:
-                zlib.gunzip(data,cb);
-                break;
-            case 2:
-                zlib.inflate(data,cb);
-                break;
-            default:
-                cb(new Error("Compression not supported"));
-                break;      
-        }
-    });
+MCAManager.prototype.read = function(x,y,cb){	
+	var self = this;
+	var data = this.cache.get(x+"/"+y);
+	if(!data){
+		var cbs = this.cachecallbacks[x+"/"+y];
+		if(!cbs){
+			this.cachecallbacks[x+"/"+y] = cbs = [cb];			
+			function callcallbacks(err,data){
+				delete self.cachecallbacks[x+"/"+y];
+				if(data){
+					self.cache[x+"/"+y] = data;
+				}
+				for(var i = 0; i < cbs.length; i++){
+					cbs[i](err,data);
+				}
+			}
+			
+			this.readRaw(x,y,function(err,data,compression){
+				if(err){
+					callcallbacks(err);
+					return;
+				}
+				if(data){
+					switch(compression){
+						case 1:
+							zlib.gunzip(data,callcallbacks);
+							break;
+						case 2:
+							zlib.inflate(data,callcallbacks);
+							break;
+						default:
+							callcallbacks(new Error("Compression not supported"));
+							break;      
+					}
+				}else{
+					callcallbacks(null);
+				}
+			});
+		}else{
+			cbs.push(cb);
+		}
+	}else{
+		cb(null,data);
+	}
 }
 
 MCAManager.prototype.setPosition = function(x,y,offset,sectors,cb){
@@ -240,7 +383,7 @@ MCAManager.prototype.setPosition = function(x,y,offset,sectors,cb){
     pos[1] = (offset>>8)%256;
     pos[2] = offset%256
     pos[3] = sectors;
-    fs.write(self.handle,pos,0,pos.length,(y*32+x)*4,function(err){
+    self._write(pos,(y*32+x)*4,function(err){
         if(err){
             cb(err);
             return;
@@ -256,12 +399,12 @@ MCAManager.prototype.writeRawAt = function(offset,data,compression,cb){
     var head = new Buffer(5);
     head.writeUInt32BE(data.length,0);
     head[4] = compression;
-    fs.write(self.handle,head,0,head.length,offset,function(err){
+    self._write(head,offset,function(err){
         if(err){
             cb(err);
             return;
         }
-        fs.write(self.handle,data,0,data.length,offset+head.length,function(err){
+        self._write(data,offset+head.length,function(err){
             if(err){
                 cb(err);
                 return;
@@ -273,35 +416,41 @@ MCAManager.prototype.writeRawAt = function(offset,data,compression,cb){
 
 MCAManager.prototype.writeRaw = function(x,y,data,compression,cb){
     var self = this;
-    self.getPosition(x,y,function(err,offset,sectors){        
-        if(err){
-            cb(err);
-            return;
-        }        
-        if(offset && data.length <= sectors*4096){
-            self.writeRawAt(offset,data,compression,cb);
-        }else{            
-            var newsectors = Math.ceil(data.length/4096);
-            var newoffset = self.findSpace(newsectors*4096);            
-            self.useSpace(newoffset,newsectors*4096);            
-            self.writeRawAt(newoffset,data,compression,function(err){
-                if(err){
-                    cb(err);
-                    return;
-                }                
-                self.setPosition(x,y,newoffset,newsectors,function(err){
-                    if(err){
-                        cb(err);
-                        return;
-                    }
-                    if(offset){
-                        self.freeSpace(offset,sectors*4096);
-                    }
-                    cb(null);
-                });                
-            });
-        }
-    });
+	self.init(function(err){
+		if(err){
+			cb(err);
+			return;
+		}
+		self.getPosition(x,y,function(err,offset,sectors){        
+			if(err){
+				cb(err);
+				return;
+			}        
+			if(offset && data.length <= sectors*4096){
+				self.writeRawAt(offset,data,compression,cb);
+			}else{            
+				var newsectors = Math.ceil(data.length/4096);
+				var newoffset = self.findSpace(newsectors*4096);            
+				self.useSpace(newoffset,newsectors*4096);            
+				self.writeRawAt(newoffset,data,compression,function(err){
+					if(err){
+						cb(err);
+						return;
+					}                
+					self.setPosition(x,y,newoffset,newsectors,function(err){
+						if(err){
+							cb(err);
+							return;
+						}
+						if(offset){
+							self.freeSpace(offset,sectors*4096);
+						}
+						cb(null);
+					});                
+				});
+			}
+		});
+	});
 }
 
 MCAManager.prototype.write = function(x,y,data,cb){
@@ -313,11 +462,4 @@ MCAManager.prototype.write = function(x,y,data,cb){
         }
         self.writeRaw(x,y,data,2,cb);
     });
-}
-
-MCAManager.prototype.close = function(cb){
-    fs.close(this.handle,cb);
-    delete this.handle;
-    delete this.head;
-    delete this.availablespace;
 }
